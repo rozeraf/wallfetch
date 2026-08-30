@@ -7,11 +7,11 @@ use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, UNIX_EPOCH};
 
 type Rgb = [u8; 3];
 type Lab = [f64; 3];
@@ -69,25 +69,22 @@ struct Args {
     #[arg(long)]
     no_cache: bool,
 
+    /// Text logo template containing $1 ... $9 placeholders
+    #[arg(long)]
+    logo_template: Option<PathBuf>,
+
+    /// Print the cached ANSI logo for a Fastfetch command module
+    #[arg(long)]
+    render_logo: bool,
+
     /// Arguments forwarded to Fastfetch
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     fastfetch_args: Vec<OsString>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
-struct CacheKey {
-    wallpaper: PathBuf,
-    mtime_ns: u128,
-    size: u64,
-    source_count: usize,
-    logo_count: usize,
-    reduction: Reduction,
-    background_threshold: f64,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct Cache {
-    key: CacheKey,
+    hash: String,
     source_colors: Vec<Rgb>,
     logo_colors: Vec<Rgb>,
     source_hex: Vec<String>,
@@ -220,21 +217,53 @@ fn find_paths_json(value: &JsonValue, context: &str, found: &mut Vec<PathBuf>) {
     }
 }
 
+fn find_paths_toml(value: &toml::Value, context: &str, found: &mut Vec<PathBuf>) {
+    match value {
+        toml::Value::Table(table) => {
+            for (key, value) in table {
+                find_paths_toml(value, &format!("{context}.{key}"), found);
+            }
+        }
+        toml::Value::Array(values) => {
+            for value in values {
+                find_paths_toml(value, context, found);
+            }
+        }
+        toml::Value::String(value)
+            if context.to_ascii_lowercase().contains("wallpaper")
+                || context.to_ascii_lowercase().contains("path") =>
+        {
+            if let Some(path) = normalize_path(value) {
+                found.push(path);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn state_file_wallpaper() -> Option<PathBuf> {
     let state_home = env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?;
+    let image_path =
+        Regex::new(r#"[\"'](/[^\"']+\.(?:png|jpe?g|webp|bmp|gif|tiff?|jxl|avif))[\"']"#).unwrap();
     for name in ["state.toml", "settings.toml"] {
         let Ok(text) = fs::read_to_string(state_home.join("noctalia").join(name)) else {
             continue;
         };
         if let Ok(value) = text.parse::<toml::Value>() {
-            let json = serde_json::to_value(value).ok()?;
             let mut found = Vec::new();
-            find_paths_json(&json, "", &mut found);
+            find_paths_toml(&value, "", &mut found);
             if let Some(path) = found.pop() {
                 return Some(path);
             }
+        }
+        if let Some(path) = image_path
+            .captures_iter(&text)
+            .filter_map(|capture| normalize_path(&capture[1]))
+            .last()
+        {
+            return Some(path);
         }
     }
     let config = env::var_os("XDG_CONFIG_HOME")
@@ -272,6 +301,9 @@ fn detect_wallpaper(args: &Args) -> Result<PathBuf, String> {
             return Ok(path);
         }
     }
+    if let Some(path) = state_file_wallpaper() {
+        return Ok(path);
+    }
     let monitor = args.monitor.as_deref();
     let mut noctalia = vec!["msg", "wallpaper-get"];
     if let Some(value) = monitor {
@@ -284,12 +316,10 @@ fn detect_wallpaper(args: &Args) -> Result<PathBuf, String> {
     if let Some(value) = monitor {
         qs.push(value);
     }
-    command_path("qs", &qs)
-        .or_else(state_file_wallpaper)
-        .ok_or_else(|| {
-            "could not determine the current Noctalia wallpaper; pass --wallpaper /path/to/image"
-                .to_owned()
-        })
+    command_path("qs", &qs).ok_or_else(|| {
+        "could not determine the current Noctalia wallpaper; pass --wallpaper /path/to/image"
+            .to_owned()
+    })
 }
 
 fn background_lab(image: &RgbImage) -> Lab {
@@ -469,43 +499,89 @@ fn reduce_colors(colors: &[Rgb], count: usize, method: Reduction) -> Vec<Rgb> {
 }
 
 fn cache_path() -> PathBuf {
-    env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .unwrap_or_else(env::temp_dir)
-        .join("noctalia-fastfetch/palette.json")
+    session_cache_dir().join("cache.json")
 }
 
-fn cache_key(wallpaper: &Path, args: &Args) -> io::Result<CacheKey> {
-    let metadata = fs::metadata(wallpaper)?;
-    let mtime_ns = metadata
-        .modified()?
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_nanos();
-    Ok(CacheKey {
-        wallpaper: wallpaper.to_owned(),
-        mtime_ns,
-        size: metadata.len(),
-        source_count: args.source_count,
-        logo_count: args.logo_count,
-        reduction: args.reduction,
-        background_threshold: args.background_threshold,
-    })
+fn session_cache_dir() -> PathBuf {
+    let uid = env::var_os("HOME")
+        .and_then(|home| fs::metadata(home).ok())
+        .map(|metadata| metadata.uid())
+        .unwrap_or(0);
+    env::temp_dir().join(format!("wallfetch-{uid}"))
 }
 
-fn load_cache(key: &CacheKey) -> Option<(Vec<Rgb>, Vec<Rgb>)> {
+fn rendered_logo_path() -> PathBuf {
+    session_cache_dir().join("logo.ansi")
+}
+
+fn logo_template_path(args: &Args) -> Result<PathBuf, String> {
+    let path = args
+        .logo_template
+        .clone()
+        .or_else(|| {
+            env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/fastfetch/logo"))
+        })
+        .ok_or("HOME is not set; pass --logo-template")?;
+    path.is_file()
+        .then_some(path.clone())
+        .ok_or_else(|| format!("logo template does not exist: {}", path.display()))
+}
+
+fn hash_file(hasher: &mut blake3::Hasher, path: &Path) -> io::Result<()> {
+    let mut file = fs::File::open(path)?;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(())
+}
+
+fn input_hash(wallpaper: &Path, template: &Path, args: &Args) -> io::Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"wallfetch-logo-v1\0");
+    hash_file(&mut hasher, wallpaper)?;
+    hash_file(&mut hasher, template)?;
+    hasher.update(&args.source_count.to_le_bytes());
+    hasher.update(&args.logo_count.to_le_bytes());
+    hasher.update(&args.background_threshold.to_le_bytes());
+    hasher.update(&[args.reduction as u8]);
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn load_cache(hash: &str) -> Option<(Vec<Rgb>, Vec<Rgb>)> {
     let cache: Cache = serde_json::from_str(&fs::read_to_string(cache_path()).ok()?).ok()?;
-    (cache.key == *key).then_some((cache.source_colors, cache.logo_colors))
+    (cache.hash == hash && rendered_logo_path().is_file())
+        .then_some((cache.source_colors, cache.logo_colors))
 }
 
-fn save_cache(key: CacheKey, source: &[Rgb], logo: &[Rgb]) -> io::Result<()> {
+fn render_logo(template: &str, colors: &[Rgb]) -> String {
+    let mut rendered = template.to_owned();
+    for (index, color) in colors.iter().enumerate().rev() {
+        rendered = rendered.replace(
+            &format!("${}", index + 1),
+            &format!("\x1b[{}m", ansi_truecolor(*color)),
+        );
+    }
+    if rendered.ends_with('\n') {
+        rendered.pop();
+        rendered.push_str("\x1b[0m\n");
+    } else {
+        rendered.push_str("\x1b[0m");
+    }
+    rendered
+}
+
+fn save_cache(hash: String, source: &[Rgb], logo: &[Rgb], rendered: &str) -> io::Result<()> {
     let path = cache_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let cache = Cache {
-        key,
+        hash,
         source_colors: source.to_vec(),
         logo_colors: logo.to_vec(),
         source_hex: source.iter().copied().map(rgb_hex).collect(),
@@ -516,6 +592,7 @@ fn save_cache(key: CacheKey, source: &[Rgb], logo: &[Rgb]) -> io::Result<()> {
         &temporary,
         format!("{}\n", serde_json::to_string_pretty(&cache)?),
     )?;
+    fs::write(rendered_logo_path(), rendered)?;
     fs::rename(temporary, path)
 }
 
@@ -528,9 +605,10 @@ fn run() -> Result<(), String> {
         return Err("--logo-count must be between 1 and 9".to_owned());
     }
     let wallpaper = detect_wallpaper(&args)?;
-    let key = cache_key(&wallpaper, &args).map_err(|e| e.to_string())?;
+    let template_path = logo_template_path(&args)?;
+    let hash = input_hash(&wallpaper, &template_path, &args).map_err(|e| e.to_string())?;
     let (source, logo) = if !args.no_cache {
-        load_cache(&key)
+        load_cache(&hash)
     } else {
         None
     }
@@ -542,11 +620,21 @@ fn run() -> Result<(), String> {
                     std::process::exit(2)
                 });
         let logo = reduce_colors(&source, args.logo_count, args.reduction);
-        if let Err(error) = save_cache(key, &source, &logo) {
+        let template = fs::read_to_string(&template_path).unwrap_or_else(|error| {
+            eprintln!("wallfetch: could not read logo template: {error}");
+            std::process::exit(2)
+        });
+        let rendered = render_logo(&template, &logo);
+        if let Err(error) = save_cache(hash, &source, &logo, &rendered) {
             eprintln!("wallfetch: could not save cache: {error}");
         }
         (source, logo)
     });
+    if args.render_logo {
+        let rendered = fs::read_to_string(rendered_logo_path()).map_err(|e| e.to_string())?;
+        print!("{rendered}");
+        return Ok(());
+    }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&serde_json::json!({
             "wallpaper": wallpaper, "source": source.iter().copied().map(rgb_hex).collect::<Vec<_>>(),
@@ -622,5 +710,14 @@ mod tests {
         let colors = [[255, 0, 0], [128, 0, 128], [0, 0, 255]];
         let reduced = reduce_colors(&colors, 2, Reduction::Resample);
         assert_eq!(reduced, vec![[255, 0, 0], [0, 0, 255]]);
+    }
+
+    #[test]
+    fn renders_ansi_logo_placeholders() {
+        let rendered = render_logo("$1red $2blue\n", &[[255, 0, 0], [0, 0, 255]]);
+        assert_eq!(
+            rendered,
+            "\x1b[38;2;255;0;0mred \x1b[38;2;0;0;255mblue\x1b[0m\n"
+        );
     }
 }
