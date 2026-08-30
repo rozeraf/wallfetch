@@ -4,6 +4,8 @@
 
 The extractor is intended for wallpapers with horizontal capsules, stripes, or blocks on a flat background; it is not a generic photo palette extractor.
 
+Supported image formats: PNG, JPEG, and WebP.
+
 ## How it works
 
 1. Finds the current wallpaper from Noctalia state, environment, or IPC.
