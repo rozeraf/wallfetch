@@ -27,6 +27,15 @@ install -Dm755 target/release/wallfetch ~/.local/bin/wallfetch
 
 Make sure `~/.local/bin` is in `$PATH`.
 
+The same operations are available through the Makefile:
+
+```bash
+make check
+make test
+make release
+make PREFIX="$HOME/.local" install
+```
+
 ## Logo template
 
 Create `~/.config/fastfetch/logo` and mark the five color regions:
