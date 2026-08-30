@@ -1,0 +1,16 @@
+[package]
+name = "wallfetch"
+version = "0.1.0"
+edition = "2021"
+description = "Color a Fastfetch logo from the current Noctalia wallpaper"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+image = "0.25"
+regex = "1.11"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.9"
+urlencoding = "2.1"
+

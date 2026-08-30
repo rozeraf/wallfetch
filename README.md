@@ -1,75 +1,56 @@
-
 # Noctalia → Fastfetch logo colors
 
 `wallfetch` takes the current Noctalia wallpaper, extracts an **ordered horizontal palette**, compresses it to the number of Fastfetch logo color slots you want, then launches Fastfetch with true-color `--logo-color-N` overrides.
 
-It is intentionally tuned for wallpapers like the example with several horizontal capsules / stripes / blocks on a flat background. Preserving the **left-to-right order** is the point; this is not a generic photo palette extractor.
+The extractor is tuned for wallpapers with horizontal capsules, stripes, or blocks on a flat background. Preserving left-to-right order is the point; this is not a generic photo palette extractor.
 
-## Why this is separate from Noctalia's generated theme
+## How it works
 
-Noctalia's wallpaper theming ultimately reduces the wallpaper to a **single source/seed color** and builds a Material palette from that seed. That is good for UI theming, but it throws away the ordered red→purple→blue progression that we want for a 5-part Fastfetch logo.
+1. Downsample the wallpaper.
+2. Estimate its flat background from the border.
+3. Find the main horizontal foreground band.
+4. Split the band into 8 regions and take a robust median color from each.
+5. Reduce 8 colors to 5 in OKLab while preserving the endpoints.
+6. Pass the colors to Fastfetch as 24-bit ANSI values.
 
-`wallfetch` therefore reuses the current wallpaper path, but performs its own multi-color extraction:
+Noctalia's Material theme uses a single seed color, so it cannot retain an ordered red → purple → blue progression. `wallfetch` reads the same wallpaper but performs its own spatial extraction.
 
-1. downsample the wallpaper;
-2. estimate the flat background from the border;
-3. find the main horizontal foreground band;
-4. split that band into 8 source regions and take a robust median color from each;
-5. reduce 8 → 5 in OKLab (perceptual color space), preserving the first and last colors;
-6. pass the 5 colors to Fastfetch as 24-bit ANSI colors.
+## Build and install
 
-## Install (Arch Linux)
+Requirements: a current stable Rust toolchain and Fastfetch.
 
 ```bash
-sudo pacman -S python-pillow fastfetch
-install -Dm755 wallfetch ~/.local/bin/wallfetch
+sudo pacman -S rust fastfetch
+cargo build --release
+install -Dm755 target/release/wallfetch ~/.local/bin/wallfetch
 ```
 
 Make sure `~/.local/bin` is in `$PATH`.
 
-## Test on a wallpaper
+## Usage
 
 ```bash
+# Inspect colors from a specific wallpaper
 wallfetch --wallpaper ~/Pictures/Wallpapers/example.png --print
-```
 
-For the supplied screenshot, the extractor returns these 8 source colors:
-
-```text
-#ff6f61 #ec6f86 #d66ea5 #b66cb6 #9567c5 #735fd0 #5d57bd #4a4e9f
-```
-
-and these 5 Fastfetch colors:
-
-```text
-#ff6f61 #db6f9e #a66abe #6e5dcb #4a4e9f
-```
-
-Run Fastfetch through the wrapper:
-
-```bash
+# Run Fastfetch through the wrapper
 wallfetch
-```
 
-Any extra Fastfetch arguments are forwarded:
-
-```bash
+# Forward additional arguments to Fastfetch
 wallfetch --config ~/.config/fastfetch/config.jsonc
 ```
 
-If you want `fastfetch` in your shell to always use dynamic wallpaper colors, an alias is enough:
+To make the wrapper the shell default:
 
 ```bash
 alias fastfetch='wallfetch'
 ```
 
-The Python process launches the real `fastfetch` executable directly, so the shell alias does not recurse.
+The wrapper launches the real `fastfetch` executable directly, so the alias does not recurse.
 
-## Fastfetch logo requirements
+## Fastfetch logo
 
-Fastfetch text logos support color slots 1–9. For a custom text logo, use `$1`, `$2`, ... `$5` before the corresponding blocks/symbols. Use `logo.type = "file"` (not `file-raw`) so Fastfetch interprets those placeholders.
-
-Example:
+Fastfetch text logos support color slots 1–9. In a custom text logo, place `$1`, `$2`, … before the corresponding blocks and use `logo.type = "file"`, not `file-raw`:
 
 ```jsonc
 {
@@ -80,82 +61,50 @@ Example:
 }
 ```
 
-Inside `logo.txt`, place the five color placeholders where the five parts begin, for example conceptually:
+Example structure:
 
 ```text
 $1BLOCK1$2BLOCK2$3BLOCK3$4BLOCK4$5BLOCK5
 ```
 
-If your built-in logo already has five color slots, no logo file change is needed.
-
 ## Noctalia integration
 
-### Noctalia v5+
+Wallpaper discovery is attempted in this order:
 
-`wallfetch` first tries Noctalia's native IPC (`noctalia msg wallpaper-get`). It also understands `NOCTALIA_WALLPAPER_PATH`, which Noctalia exposes to the `wallpaper_changed` hook.
+1. `--wallpaper /path/to/image`;
+2. `NOCTALIA_WALLPAPER_PATH`;
+3. Noctalia v5 IPC: `noctalia msg wallpaper-get`;
+4. Noctalia v4 / Quickshell IPC: `qs ipc call wallpaper get`;
+5. Noctalia state/config files.
 
-You do **not** need a hook because `wallfetch` caches by wallpaper path + mtime and recalculates lazily. If you want to pre-warm the cache immediately on wallpaper change, add this to a Noctalia TOML config:
+For multiple monitors:
+
+```bash
+wallfetch --monitor DP-1
+```
+
+The palette is cached by wallpaper identity and extraction options. A Noctalia v5 hook can pre-warm it:
 
 ```toml
 [hooks]
 wallpaper_changed = "~/.local/bin/wallfetch --wallpaper \"$NOCTALIA_WALLPAPER_PATH\" --cache-only"
 ```
 
-### Noctalia Shell v4 / Quickshell
+Cache: `~/.cache/noctalia-fastfetch/palette.json`.
 
-The wrapper falls back to:
-
-```bash
-qs ipc call wallpaper get
-```
-
-On a multi-monitor setup, specify the connector if needed:
-
-```bash
-wallfetch --monitor DP-1
-```
-
-You can also bypass all auto-detection:
-
-```bash
-wallfetch --wallpaper /absolute/path/to/wallpaper.png
-```
-
-## Reduction modes
-
-Default (`resample`) preserves the two endpoint colors and interpolates the three middle logo colors in OKLab:
-
-```bash
-wallfetch --reduction resample --print
-```
-
-If you want a literal area-average 8 → 5 reduction instead:
-
-```bash
-wallfetch --reduction mean --print
-```
-
-On the supplied screenshot, `mean` produces approximately:
+## Main options
 
 ```text
-#f86f70 #d76fa0 #a66abe #725eca #5151aa
+--source-count 8          source horizontal color regions
+--logo-count 5            Fastfetch output slots (1..9)
+--reduction resample      endpoint-preserving OKLab interpolation
+--reduction mean          area-weighted OKLab reduction
+--monitor DP-1            Noctalia connector
+--background-threshold    background separation threshold (default: 0.055)
+--print                    print detected colors
+--json                     machine-readable output
+--cache-only               update cache without starting Fastfetch
+--no-cache                 force re-extraction
 ```
 
-## Useful options
-
-```text
---source-count 8       source horizontal color regions
---logo-count 5         Fastfetch output slots (1..9)
---monitor DP-1         Noctalia connector
---background-threshold 0.055
---print                show detected colors and Fastfetch arguments
---json                 machine-readable output
---cache-only           update cache without starting Fastfetch
---no-cache             force re-extraction
-```
-
-Cache file:
-
-```text
-~/.cache/noctalia-fastfetch/palette.json
-```
+Run `wallfetch --help` for the complete CLI reference.
