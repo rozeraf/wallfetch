@@ -1,0 +1,19 @@
+[wallpaper]
+# Use "noctalia" to discover the current wallpaper, or "path" with the path below.
+source = "noctalia"
+# path = "~/Pictures/Wallpapers/example.png"
+# monitor = "DP-1"
+
+[palette]
+source_count = 8
+color_count = 5
+reduction = "resample"
+background_threshold = 0.055
+
+[template]
+path = "~/.config/wallfetch/template"
+
+# Instead of path, a template can be embedded directly:
+# inline = """
+# $1ONE $2TWO $3THREE $4FOUR $5FIVE
+# """

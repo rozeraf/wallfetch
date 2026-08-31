@@ -1,9 +1,14 @@
 [package]
 name = "wallfetch"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Color a Fastfetch logo from the current Noctalia wallpaper"
+description = "Extract ordered wallpaper palettes and apply them to text templates"
 license = "MIT"
+repository = "https://github.com/rozeraf/wallfetch"
+homepage = "https://github.com/rozeraf/wallfetch"
+readme = "README.md"
+keywords = ["wallpaper", "palette", "color", "terminal", "noctalia"]
+categories = ["command-line-utilities", "multimedia::images"]
 
 [dependencies]
 blake3 = "1.8"

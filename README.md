@@ -1,137 +1,228 @@
-# Noctalia → Fastfetch logo colors
+# wallfetch
 
-`wallfetch` colors a Fastfetch text logo directly from the current Noctalia wallpaper. It preserves the wallpaper's left-to-right color order instead of using Noctalia's single Material seed color.
+`wallfetch` is an independent ordered-palette provider for wallpapers. It separates color extraction from output formatting, so scripts and applications can consume the palette directly or apply it to a text template.
 
-The extractor is intended for wallpapers with horizontal capsules, stripes, or blocks on a flat background; it is not a generic photo palette extractor.
+It is designed for wallpapers with horizontal capsules, stripes, or blocks on a flat background. Preserving left-to-right color order is the goal; it is not a general-purpose photographic palette extractor.
 
-Supported image formats: PNG, JPEG, and WebP.
+## Pipeline
 
-## How it works
+```text
+wallpaper source
+      │
+      ▼
+ordered source colors → reduced output palette → wallfetch colors
+                                      │
+                                      └── + template → wallfetch render
+```
 
-1. Finds the current wallpaper from Noctalia state, environment, or IPC.
-2. Estimates the flat background and locates the main horizontal foreground band.
-3. Extracts 8 ordered median colors and reduces them to 5 colors in OKLab.
-4. Replaces `$1` … `$5` in the logo template with true-color ANSI sequences.
-5. Stores the rendered logo and metadata in `/tmp/wallfetch-UID/`.
-6. On later runs, compares a BLAKE3 hash of the wallpaper, logo template, and extraction settings. If it matches, the image is not decoded again.
+The two public stages are explicit:
 
-The generated ANSI logo is designed to be called from a Fastfetch `command` module. This bypasses Noctalia's generated `logo.color` values completely.
+- `wallfetch colors` returns colors without knowing or caring how they will be used;
+- `wallfetch render` applies those same colors to `$1`, `$2`, … placeholders in a template.
+
+There is no dependency on a particular output program.
 
 ## Build and install
 
-Requirements: a current stable Rust toolchain and Fastfetch.
+Supported image formats are PNG, JPEG, and WebP.
 
 ```bash
-sudo pacman -S rust fastfetch
 cargo build --release
-install -Dm755 target/release/wallfetch ~/.local/bin/wallfetch
-```
-
-Make sure `~/.local/bin` is in `$PATH`.
-
-The same operations are available through the Makefile:
-
-```bash
-make check
-make test
-make release
 make PREFIX="$HOME/.local" install
 ```
 
-## Logo template
+Or install system-wide:
 
-Create `~/.config/fastfetch/logo` and mark the five color regions:
-
-```text
-$1BLOCK1 $2BLOCK2 $3BLOCK3 $4BLOCK4 $5BLOCK5
+```bash
+sudo make install
 ```
 
-The template can be changed with `--logo-template /path/to/logo`.
+## Configuration
 
-## Fastfetch configuration
+The default config path is:
 
-Disable the built-in logo and put the dynamic logo command first in `modules`:
+```text
+$XDG_CONFIG_HOME/wallfetch/config.toml
+```
 
-```jsonc
+with `~/.config/wallfetch/config.toml` as the usual fallback.
+
+Example:
+
+```toml
+[wallpaper]
+# "noctalia" discovers the current wallpaper automatically.
+# "path" reads the explicit path below.
+source = "noctalia"
+# path = "~/Pictures/Wallpapers/example.png"
+# monitor = "DP-1"
+
+[palette]
+source_count = 8
+color_count = 5
+reduction = "resample"
+background_threshold = 0.055
+
+[template]
+path = "~/.config/wallfetch/template"
+```
+
+Copy the examples to get started:
+
+```bash
+mkdir -p ~/.config/wallfetch
+cp examples/config.toml ~/.config/wallfetch/config.toml
+cp examples/template ~/.config/wallfetch/template
+```
+
+### Wallpaper sources
+
+Use the current Noctalia wallpaper:
+
+```toml
+[wallpaper]
+source = "noctalia"
+```
+
+Or use a fixed image:
+
+```toml
+[wallpaper]
+source = "path"
+path = "~/Pictures/Wallpapers/example.png"
+```
+
+`--wallpaper /path/to/image.png` overrides either source from the command line.
+
+### Templates
+
+A template may come from a file:
+
+```toml
+[template]
+path = "~/.config/wallfetch/template"
+```
+
+or be embedded in the config:
+
+```toml
+[template]
+inline = """
+$1ONE $2TWO $3THREE $4FOUR $5FIVE
+"""
+```
+
+`path` and `inline` are mutually exclusive. `wallfetch render` replaces placeholders with ANSI true-color sequences and appends a terminal reset sequence.
+
+## Getting colors
+
+Plain hexadecimal output is stable and easy to consume from shell scripts:
+
+```bash
+wallfetch colors
+```
+
+```text
+#ff6f61 #db6f9e #a66abe #6d5dcb #4a4e9f
+```
+
+Other representations:
+
+```bash
+wallfetch colors --format rgb
+wallfetch colors --format json
+```
+
+JSON includes the wallpaper path, the original spatial samples, and the reduced palette:
+
+```json
 {
-  "logo": {
-    "type": "none"
-  },
-  "modules": [
-    {
-      "type": "command",
-      "key": " ",
-      "text": "~/.local/bin/wallfetch --render-logo",
-      "format": "{result}"
-    },
-    {
-      "type": "title"
-    }
-  ]
+  "wallpaper": "/path/to/wallpaper.png",
+  "source": ["#ff6f61", "#ec6f86"],
+  "colors": ["#ff6f61", "#db6f9e"]
 }
 ```
 
-Now ordinary `fastfetch` calls `wallfetch` only for the logo. No alias or wrapper is required.
+This stage does not load or validate a template.
 
-## Usage
+## Rendering a template
 
 ```bash
-# Output the ANSI logo for Fastfetch
-wallfetch --render-logo
-
-# Inspect extracted colors
-wallfetch --print
-
-# Machine-readable palette
-wallfetch --json
-
-# Test a specific wallpaper
-wallfetch --wallpaper ~/Pictures/Wallpapers/example.png --render-logo
-
-# Force regeneration
-wallfetch --no-cache --render-logo
+wallfetch render
 ```
 
-Calling `wallfetch` without an output option remains supported: it launches Fastfetch with dynamic `--logo-color-N` arguments for compatibility.
+Override the configured template when needed:
 
-## Wallpaper discovery
+```bash
+wallfetch render --template /path/to/template
+```
 
-Discovery order:
+The formatted ANSI output is written to stdout. Any application capable of executing a command and preserving ANSI escape sequences can consume it.
 
-1. `--wallpaper /path/to/image`;
-2. `NOCTALIA_WALLPAPER_PATH`;
-3. Noctalia state/config files;
-4. Noctalia v5 IPC: `noctalia msg wallpaper-get`;
-5. legacy Noctalia v4 / Quickshell IPC: `qs ipc call wallpaper get`.
+The formatting stage can also accept a palette without reading any wallpaper:
 
-For multiple monitors, pass `--monitor DP-1`. An explicit `--wallpaper` always takes priority.
+```bash
+wallfetch render --colors "#ff0000 #00ff00 #0000ff"
+```
+
+Use `-` to compose the two stages through a pipe:
+
+```bash
+wallfetch colors | wallfetch render --colors -
+```
+
+In this form, `render` does not resolve a wallpaper, inspect Noctalia, decode an image, or access the palette cache. It only loads the template and formats the supplied colors.
 
 ## Cache
 
-The per-user cache is stored under:
+Only palette extraction is cached. Formatting is deliberately separate and inexpensive, so templates can change without re-decoding the wallpaper.
+
+The cache is stored in:
 
 ```text
-/tmp/wallfetch-UID/cache.json
-/tmp/wallfetch-UID/logo.ansi
+$XDG_RUNTIME_DIR/wallfetch/palette.json
 ```
 
-Changing the wallpaper bytes, template, color counts, reduction mode, or background threshold invalidates it automatically. `/tmp` normally clears on reboot, so the first Fastfetch run in a new session regenerates the logo.
+If `XDG_RUNTIME_DIR` is unavailable, the fallback is `/tmp/wallfetch-UID/palette.json`.
 
-## Main options
+The BLAKE3 cache key includes wallpaper contents and every extraction setting. Use `--no-cache` to force extraction:
+
+```bash
+wallfetch --no-cache colors
+```
+
+## CLI overrides
+
+Global options work before or after the subcommand:
 
 ```text
---render-logo              print cached/generated ANSI logo
---logo-template PATH       custom logo template
---source-count 8           source horizontal color regions
---logo-count 5             output colors (1..9)
---reduction resample       endpoint-preserving OKLab interpolation
---reduction mean           area-weighted OKLab reduction
---monitor DP-1             Noctalia connector
---background-threshold N   background separation threshold
---print                     print detected colors
---json                      machine-readable output
---cache-only                regenerate cache without output
---no-cache                  force regeneration
+--config PATH
+--wallpaper PATH
+--monitor NAME
+--source-count N
+--color-count N
+--reduction resample|mean
+--background-threshold N
+--no-cache
 ```
 
-Run `wallfetch --help` for the complete CLI reference.
+Run `wallfetch --help`, `wallfetch colors --help`, or `wallfetch render --help` for the complete reference.
+
+## Migration from 0.1
+
+Version 0.2 removes all consumer-specific behavior:
+
+```text
+wallfetch --print          → wallfetch colors
+wallfetch --json           → wallfetch colors --format json
+wallfetch --render-logo    → wallfetch render
+--logo-count N             → --color-count N
+```
+
+Move the template and settings into `~/.config/wallfetch/`. Programs consuming the formatted output should execute `wallfetch render` through `PATH`.
+
+See [CHANGELOG.md](CHANGELOG.md) for the complete list of breaking changes.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
